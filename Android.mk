@@ -79,14 +79,15 @@ else
     LOCAL_CFLAGS += -DTW_EXCLUDE_APEX
 endif
 
-LOCAL_STATIC_LIBRARIES += libavb libtwrpinstall libminadbd_services libinit libsnapshot_nobinder update_metadata-protos
-LOCAL_SHARED_LIBRARIES += libfs_mgr libhardware android.hardware.boot@1.0 android.hardware.boot@1.1 android.hardware.boot@1.2 libprotobuf-cpp-lite liblp libutils libhidlbase
+LOCAL_STATIC_LIBRARIES += libavb libtwrpinstall libminadbd_services libinit libsnapshot_nobinder update_metadata-protos librecovery_utils libhealthhalutils
+LOCAL_SHARED_LIBRARIES += libfs_mgr libhardware android.hardware.boot@1.0 android.hardware.boot@1.1 android.hardware.boot@1.2 libprotobuf-cpp-lite liblp libutils libhidlbase android.hardware.health@2.0
 LOCAL_C_INCLUDES += \
     system/core/fs_mgr/libfs_avb/include/ \
     system/core/fs_mgr/include_fstab/ \
     system/core/fs_mgr/include/ \
     system/core/fs_mgr/libdm/include/ \
     system/core/fs_mgr/liblp/include/ \
+    system/core/fs_mgr/ \
     system/gsid/include/ \
     system/core/init/ \
     system/extras/ext4_utils/include \
@@ -157,8 +158,6 @@ endif
 
 ifeq ($(PRODUCT_USE_DYNAMIC_PARTITIONS),true)
     LOCAL_CFLAGS += -DPRODUCT_USE_DYNAMIC_PARTITIONS=1
-    TWRP_REQUIRED_MODULES += android.hardware.health@2.1-service android.hardware.health@2.1-impl.recovery android.hardware.health@2.1-service.rc android.hardware.health@2.1.xml
-    TWRP_REQUIRED_MODULES += android.hardware.health@2.0-service android.hardware.health@2.0-impl.recovery android.hardware.health@2.0-service.rc
     ifeq ($(TW_EXCLUDE_LPDUMP),)
         TWRP_REQUIRED_MODULES += lpdump lpdumpd.rc
     endif
@@ -315,6 +314,9 @@ ifneq ($(TW_LOAD_VENDOR_MODULES),)
     LOCAL_C_INCLUDES += system/core/libmodprobe/include
     LOCAL_STATIC_LIBRARIES += libmodprobe
     LOCAL_CFLAGS += -DTW_LOAD_VENDOR_MODULES=$(TW_LOAD_VENDOR_MODULES)
+    ifeq ($(TW_LOAD_VENDOR_MODULES_EXCLUDE_GKI),true)
+        LOCAL_CFLAGS += -DTW_LOAD_VENDOR_MODULES_EXCLUDE_GKI
+    endif
 endif
 ifeq ($(TW_INCLUDE_CRYPTO), true)
     LOCAL_CFLAGS += -DTW_INCLUDE_CRYPTO -DUSE_FSCRYPT -Wno-macro-redefined
@@ -349,6 +351,7 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
         endif
         LOCAL_SHARED_LIBRARIES += libcryptfs_hw
     endif
+    TW_INCLUDE_LIBRESETPROP := true
 endif
 WITH_CRYPTO_UTILS := \
     $(if $(wildcard system/core/libcrypto_utils/android_pubkey.c),true)
@@ -372,11 +375,6 @@ ifneq ($(TW_DEFAULT_BRIGHTNESS),)
 endif
 ifneq ($(TW_CUSTOM_BATTERY_PATH),)
 	LOCAL_CFLAGS += -DTW_CUSTOM_BATTERY_PATH=$(TW_CUSTOM_BATTERY_PATH)
-endif
-ifneq ($(TW_BATTERY_SYSFS_WAIT_SECONDS),)
-	LOCAL_CFLAGS += -DTW_BATTERY_SYSFS_WAIT_SECONDS=$(TW_BATTERY_SYSFS_WAIT_SECONDS)
-else
-	LOCAL_CFLAGS += -DTW_BATTERY_SYSFS_WAIT_SECONDS=3
 endif
 ifneq ($(TW_CUSTOM_CPU_TEMP_PATH),)
 	LOCAL_CFLAGS += -DTW_CUSTOM_CPU_TEMP_PATH=$(TW_CUSTOM_CPU_TEMP_PATH)
@@ -440,6 +438,15 @@ endif
 ifeq ($(TW_INCLUDE_FASTBOOTD), true)
     LOCAL_CFLAGS += -DTW_INCLUDE_FASTBOOTD
 endif
+ifeq ($(TW_ENABLE_BLKDISCARD), true)
+    LOCAL_CFLAGS += -DTW_ENABLE_BLKDISCARD
+endif
+ifeq ($(TW_SKIP_ADDITIONAL_FSTAB), true)
+    LOCAL_CFLAGS += -DTW_SKIP_ADDITIONAL_FSTAB
+endif
+ifeq ($(TW_FORCE_KEYMASTER_VER), true)
+    LOCAL_CFLAGS += -DTW_FORCE_KEYMASTER_VER
+endif
 
 LOCAL_C_INCLUDES += system/vold \
 
@@ -478,7 +485,14 @@ TWRP_REQUIRED_MODULES += \
     privapp-permissions-twrpapp.xml \
     adbd_system_api_recovery \
     libsync.recovery \
-    libandroidicu.recovery
+    libandroidicu.recovery \
+    android.hardware.health@2.1-service \
+    android.hardware.health@2.1-impl.recovery \
+    android.hardware.health@2.1-service.rc \
+    android.hardware.health@2.1.xml \
+    android.hardware.health@2.0-service \
+    android.hardware.health@2.0-impl.recovery \
+    android.hardware.health@2.0-service.rc
 
 ifneq ($(TW_EXCLUDE_TZDATA), true)
 TWRP_REQUIRED_MODULES += \
@@ -506,6 +520,11 @@ endif
 ifeq ($(TW_INCLUDE_RESETPROP), true)
 TWRP_REQUIRED_MODULES += \
     resetprop
+endif
+
+ifeq ($(TW_INCLUDE_LIBRESETPROP), true)
+TWRP_REQUIRED_MODULES += \
+    libresetprop
 endif
 
 TWRP_REQUIRED_MODULES += \

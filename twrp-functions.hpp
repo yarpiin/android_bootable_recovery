@@ -75,7 +75,6 @@ public:
 	static timespec timespec_diff(timespec& start, timespec& end);	            // Return a diff for 2 times
 	static int32_t timespec_diff_ms(timespec& start, timespec& end);            // Returns diff in ms
 	static bool Wait_For_File(const string& path, std::chrono::nanoseconds timeout); // Wait For File, True is success, False is timeout;
-	static bool Wait_For_Battery(std::chrono::nanoseconds timeout);             // Wait For /sys/class/power_supply/battery or TW_CUSTOM_BATTERY_PATH, True is success, False is timeout;
 
 #ifndef BUILD_TWRPTAR_MAIN
 	static int Recursive_Mkdir(string Path);                                    // Recursively makes the entire path
@@ -116,10 +115,13 @@ public:
 	static bool Is_TWRP_App_In_System(); // Check if the TWRP app is installed in the system partition
 	static void checkforapp();
 	static int Property_Override(string Prop_Name, string Prop_Value); // Override properties (including ro. properties)
+	static int Delete_Property(string Prop_Name); // Delete properties (non-persistent properties only)
 	static void List_Mounts(); // List current mounts by the kernel
 	static void Clear_Bootloader_Message(); // Removes the bootloader message from misc for next boot
 	static string Check_For_TwrpFolder(); // Gets user defined path on storage where backups should be stored
 	static bool Check_Xml_Format(const std::string filename); // Return whether a xml is in plain xml or ABX format
+	static bool Find_Fstab(string &fstab);
+	static bool Get_Service_From_Manifest(std::string basepath, std::string service, std::string &ret);
 
 	static bool abx_to_xml(const std::string path, std::string &result); // could we convert abx to xml (if so, return the full path to the converted file)
 private:

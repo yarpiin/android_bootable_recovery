@@ -25,6 +25,7 @@
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <fstab/fstab.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/sendfile.h>
@@ -47,6 +48,7 @@
 #include "abx-functions.hpp"
 #include "twcommon.h"
 #include "gui/gui.hpp"
+#include <fs_mgr_priv_boot_config.h>
 #ifndef BUILD_TWRPTAR_MAIN
 #include "data.hpp"
 #include "partitions.hpp"
@@ -55,6 +57,8 @@
 #include "cutils/properties.h"
 #include "cutils/android_reboot.h"
 #include <sys/reboot.h>
+#include "gui/rapidxml.hpp"
+#include "gui/pages.hpp"
 #endif // ndef BUILD_TWRPTAR_MAIN
 #ifndef TW_EXCLUDE_ENCRYPTED_BACKUPS
 	#include "openaes/inc/oaes_lib.h"
@@ -419,18 +423,6 @@ bool TWFunc::Wait_For_File(const string& path, std::chrono::nanoseconds timeout)
         }
         std::this_thread::sleep_for(10ms);
     }
-	return false;
-}
-
-bool TWFunc::Wait_For_Battery(std::chrono::nanoseconds timeout) {
-	std::string battery_path;
-#ifdef TW_CUSTOM_BATTERY_PATH
-	battery_path = EXPAND(TW_CUSTOM_BATTERY_PATH);
-#else
-	battery_path = "/sys/class/power_supply/battery";
-#endif
-	if (!battery_path.empty()) return TWFunc::Wait_For_File(battery_path, timeout);
-
 	return false;
 }
 
@@ -1398,7 +1390,15 @@ int TWFunc::Property_Override(string Prop_Name, string Prop_Value) {
 #ifdef TW_INCLUDE_LIBRESETPROP
     return setprop(Prop_Name.c_str(), Prop_Value.c_str(), false);
 #else
-    return -2;
+    return NOT_AVAILABLE;
+#endif
+}
+
+int TWFunc::Delete_Property(string Prop_Name) {
+#ifdef TW_INCLUDE_LIBRESETPROP
+    return delprop(Prop_Name.c_str(), false);
+#else
+    return NOT_AVAILABLE;
 #endif
 }
 
@@ -1439,7 +1439,7 @@ string TWFunc::Check_For_TwrpFolder() {
 			type = Get_D_Type_From_Stat(fullPath);
 		}
 
-		if (type == DT_DIR && Path_Exists(fullPath + '/' + TW_SETTINGS_FILE)) {
+		if (type == DT_DIR && Path_Exists(fullPath + "/.twrpcf")) {
 			if ('/' + name == TW_DEFAULT_RECOVERY_FOLDER) {
 				oldFolder = name;
 			} else {
@@ -1452,6 +1452,9 @@ string TWFunc::Check_For_TwrpFolder() {
 
 	if (oldFolder == "" && customTWRPFolders.empty()) {
 		LOGINFO("No recovery folder found. Using default folder.\n");
+		//Creates the TWRP folder if it does not exist on the device and if the folder has not been changed to a new name
+		mainPath += TW_DEFAULT_RECOVERY_FOLDER;
+		mkdir(mainPath.c_str(), 0777);
 		goto exit;
 	} else if (customTWRPFolders.empty()) {
 		LOGINFO("No custom recovery folder found. Using TWRP as default.\n");
@@ -1555,6 +1558,101 @@ bool TWFunc::abx_to_xml(const std::string path, std::string &result) {
 	outfile.close();
 
 	return res;
+}
+
+std::string GetFstabPath() {
+	for (const char* prop : {"fstab_suffix", "hardware", "hardware.platform"}) {
+		std::string suffix;
+
+		if (!fs_mgr_get_boot_config(prop, &suffix)) continue;
+
+		for (const char* prefix : {// late-boot/post-boot locations
+			"/odm/etc/fstab.", "/vendor/etc/fstab.",
+			// early boot locations
+			"/system/etc/fstab.", "/first_stage_ramdisk/system/etc/fstab.",
+			"/fstab.", "/first_stage_ramdisk/fstab."}) {
+				std::string fstab_path = prefix + suffix;
+				LOGINFO("%s: %s\n", __func__, fstab_path.c_str());
+				if (access(fstab_path.c_str(), F_OK) == 0) return fstab_path;
+		}
+	}
+
+	return "";
+}
+
+bool TWFunc::Find_Fstab(string &fstab) {
+	fstab = GetFstabPath();
+	if (fstab == "") return false;
+	return true;
+}
+
+static inline std::string Get_Version_From_FQ(std::string name) {
+	int start, end;
+	start = name.find('@') + 1;
+	end = name.find(":") - start;
+	return name.substr(start, end);
+}
+
+bool TWFunc::Get_Service_From_Manifest(std::string basepath, std::string service, std::string &res) {
+	std::string manifestpath, filename, platform;
+	manifestpath = basepath + "/etc/vintf/";
+	bool ret = false;
+
+	// Prefer using ro.boot.product.vendor.sku property, following AOSP VintfObject::fetchVendorHalManifest
+	// If not set, also try ro.board.platform.
+	platform = android::base::GetProperty("ro.boot.product.vendor.sku", "");
+	if (platform.empty()) {
+		LOGINFO("Property ro.boot.product.vendor.sku not found, trying to get vintf manifest file name from ro.board.platform\n");
+		platform = android::base::GetProperty("ro.board.platform", "");
+	}
+
+	// Let's find the service xml if exists
+	Exec_Cmd("find " + manifestpath + "manifest/ -type f -name *" + service + "*", filename, false);
+	if (filename.empty()) {
+		LOGINFO("Separate manifest doesn't exist for '%s'\n", service.c_str());
+		// Look for manifest_PLATFORM.xml
+		filename = manifestpath + "manifest_" + platform + ".xml";
+		if (!Path_Exists(filename)) {
+			// Use legacy manifest path if platform manifest is not found.
+			LOGINFO("%s not found. Using default path for manifest.xml\n", filename.c_str());
+			filename = manifestpath + "manifest.xml";
+		}
+	}
+	if (Path_Exists(filename)) {
+		char* manifest = PageManager::LoadFileToBuffer(filename, NULL);
+		LOGINFO("Looking for '%s' service in manifest\n", service.c_str());
+		xml_document<>* vintfManifest = new xml_document<>();
+		vintfManifest->parse<0>(manifest);
+		xml_node<>* manifestNode = vintfManifest->first_node("manifest");
+		std::string version;
+		if (manifestNode) {
+			for (xml_node<>* child = manifestNode->first_node(); child; child = child->next_sibling()) {
+				std::string type = child->name();
+				if (type == "hal") {
+					xml_node<>* nameNode = child->first_node("name");
+					type = nameNode->value();
+					if (type == service) {
+						xml_node<> *versionNode = child->first_node("version");
+						if (versionNode != nullptr) {
+							LOGINFO("Found version in manifest: %s\n", versionNode->value());
+						} else {
+							versionNode = child->first_node("fqname");
+							if (versionNode == nullptr) return ret;
+							LOGINFO("Found fqname in manifest: %s\n", versionNode->value());
+						}
+						version = versionNode->value();
+						if (version.find('@') == std::string::npos) {
+							res = version;
+						} else {
+							res = Get_Version_From_FQ(version);
+						}
+						ret = true;
+					}
+				}
+			}
+		}
+	}
+	return ret;
 }
 
 #endif // ndef BUILD_TWRPTAR_MAIN

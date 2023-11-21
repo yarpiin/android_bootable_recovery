@@ -75,6 +75,10 @@
 #include "twrpRepacker.hpp"
 #include "adbbu/libtwadbbu.hpp"
 
+#ifdef TW_LOAD_VENDOR_MODULES
+#include "kernel_module_loader.hpp"
+#endif
+
 #ifdef TW_HAS_MTP
 #ifdef TW_HAS_LEGACY_MTP
 #include "mtp/legacy/mtp_MtpServer.hpp"
@@ -122,6 +126,8 @@ using android::fs_mgr::MetadataBuilder;
 extern bool datamedia;
 std::vector<users_struct> Users_List;
 
+std::string additional_fstab = "/etc/additional.fstab";
+
 TWPartitionManager::TWPartitionManager(void) {
 	mtp_was_enabled = false;
 	mtp_write_fd = -1;
@@ -157,12 +163,117 @@ int TWPartitionManager::Set_Crypto_Type(const char* crypto_type) {
 	return 0;
 }
 
+void inline Reset_Prop_From_Partition(std::string prop, std::string def, TWPartition *ven, TWPartition *odm) {
+	bool prop_on_odm = false, prop_on_vendor = false;
+	string prop_value;
+	if (odm) {
+		string odm_prop = TWFunc::Partition_Property_Get(prop, PartitionManager, "/odm", "etc/build.prop");
+		if (!odm_prop.empty()) {
+			prop_on_odm = true;
+			if (TWFunc::Property_Override(prop, odm_prop) == NOT_AVAILABLE) {
+				LOGERR("Unable to override '%s' due to missing libresetprop\n", prop.c_str());
+			} else {
+				prop_value = android::base::GetProperty(prop, "");
+				LOGINFO("Setting '%s' to '%s' from /odm/etc/build.prop\n", prop.c_str(), prop_value.c_str());
+			}
+		}
+	}
+	if (ven) {
+		string vendor_prop = TWFunc::Partition_Property_Get(prop, PartitionManager, "/vendor", "build.prop");
+		if (!vendor_prop.empty()) {
+			prop_on_vendor = true;
+			if (TWFunc::Property_Override(prop, vendor_prop) == NOT_AVAILABLE) {
+				LOGERR("Unable to override '%s' due to missing libresetprop\n", prop.c_str());
+			} else {
+				prop_value = android::base::GetProperty(prop, "");
+				LOGINFO("Setting '%s' to '%s' from /vendor/build.prop\n", prop.c_str(), prop_value.c_str());
+			}
+		}
+	}
+	if (!prop_on_odm && !prop_on_vendor && !def.empty()) {
+		if (TWFunc::Property_Override(prop, def) == NOT_AVAILABLE) {
+			LOGERR("Unable to override '%s' due to missing libresetprop\n", prop.c_str());
+		} else {
+			prop_value = android::base::GetProperty(prop, "");
+			LOGINFO("Setting '%s' to default value (%s)\n", prop.c_str(), prop_value.c_str());
+		}
+	}
+	prop_value = android::base::GetProperty(prop, "");
+	if (!prop_on_odm && !prop_on_vendor && !prop_value.empty() && def.empty()) {
+		if(TWFunc::Delete_Property(prop) == NOT_AVAILABLE) {
+			LOGERR("Unable to delete '%s' due to missing libresetprop\n", prop.c_str());
+		} else {
+			LOGINFO("Deleting property '%s'\n", prop.c_str());
+		}
+	}
+}
+
+void inline Process_ResetProps(TWPartition *ven, TWPartition *odm) {
+	// Reset the crypto volume props according to os.
+	Reset_Prop_From_Partition("ro.crypto.dm_default_key.options_format.version", "", ven, odm);
+	Reset_Prop_From_Partition("ro.crypto.volume.metadata.method", "", ven, odm);
+	Reset_Prop_From_Partition("ro.crypto.volume.options", "", ven, odm);
+	Reset_Prop_From_Partition("external_storage.projid.enabled", "", ven, odm);
+	Reset_Prop_From_Partition("external_storage.casefold.enabled", "", ven, odm);
+	Reset_Prop_From_Partition("external_storage.sdcardfs.enabled", "", ven, odm);
+}
+
+static inline std::string KM_Ver_From_Manifest(std::string ver) {
+	TWFunc::Get_Service_From_Manifest("/vendor", "android.hardware.keymaster", ver);
+	if (strstr(ver.c_str(), "4")) {
+		ver = "4.x";
+	}
+	return ver;
+}
+
+void inline Process_Keymaster_Version(TWPartition *ven, bool Display_Error) {
+	// Fetch the Keymaster Service version to be started
+	std::string version;
+#ifndef TW_FORCE_KEYMASTER_VER
+	version = KM_Ver_From_Manifest(version);
+
+	/* If we are unable to get the version from device vendor then
+		* set the version from the keymaster_ver prop if set
+		*/
+	if (version.empty()) {
+		// unmount partition(s)
+		if (ven) ven->UnMount(Display_Error);
+
+		// Use keymaster_ver prop set from device tree (if exists)
+		version = android::base::GetProperty(TW_KEYMASTER_VERSION_PROP, version);
+		if (version.empty()) {
+			LOGINFO("Keymaster_Ver::Unable to find vendor manifest on the device, and no default value set. Checking the ramdisk manifest\n");
+			version = KM_Ver_From_Manifest(version);
+		} else {
+			LOGINFO("Keymaster_Ver::Unable to find vendor manifest on the device. Setting to default value.\n");
+		}
+	} else {
+		if (ven) ven->UnMount(Display_Error);
+	}
+#else
+	if (ven) ven->UnMount(Display_Error);
+
+	version = android::base::GetProperty(TW_KEYMASTER_VERSION_PROP, version);
+	if (version.empty()) {
+		LOGINFO("Keymaster_Ver::Force Keymaster_Ver flag found, but keymaster_ver prop not set.\n");
+	} else {
+		LOGINFO("Keymaster_Ver::Force Keymaster_Ver flag found.\n");
+	}
+#endif
+	LOGINFO("Keymaster_Ver::Using keymaster version '%s' for decryption\n", version.c_str());
+	android::base::SetProperty(TW_KEYMASTER_VERSION_PROP, version.c_str());
+}
+
 int TWPartitionManager::Process_Fstab(string Fstab_Filename, bool Display_Error, bool recovery_mode) {
 	FILE *fstabFile;
 	char fstab_line[MAX_FSTAB_LINE_LENGTH];
+	bool parse_userdata = false;
 	std::map<string, Flags_Map> twrp_flags;
 
 	fstabFile = fopen("/etc/twrp.flags", "rt");
+	if (Get_Super_Status()) {
+		Setup_Super_Devices();
+	}
 	if (fstabFile != NULL) {
 		LOGINFO("Reading /etc/twrp.flags\n");
 		while (fgets(fstab_line, sizeof(fstab_line), fstabFile) != NULL) {
@@ -218,9 +329,13 @@ int TWPartitionManager::Process_Fstab(string Fstab_Filename, bool Display_Error,
 		}
 		fclose(fstabFile);
 	}
-
+	TWPartition *data = NULL;
+	TWPartition *meta = NULL;
+#ifndef TW_SKIP_ADDITIONAL_FSTAB
+parse:
+#endif
 	fstabFile = fopen(Fstab_Filename.c_str(), "rt");
-	if (fstabFile == NULL) {
+	if (!parse_userdata && fstabFile == NULL) {
 		LOGERR("Critical Error: Unable to open fstab at '%s'.\n", Fstab_Filename.c_str());
 		return false;
 	} else
@@ -233,21 +348,47 @@ int TWPartitionManager::Process_Fstab(string Fstab_Filename, bool Display_Error,
 		if (fstab_line[0] == '#')
 			continue;
 
+		if (parse_userdata) {
+			if (strstr(fstab_line, "/metadata") && !strstr(fstab_line, "/data")) {
+				if (meta) {
+					Partitions.erase(std::find(Partitions.begin(), Partitions.end(), meta));
+					delete meta;
+					meta = NULL;
+				}
+			} else if (strstr(fstab_line, "/data")) {
+				if (data) {
+					Partitions.erase(std::find(Partitions.begin(), Partitions.end(), data));
+					delete data;
+					data = NULL;
+				}
+			} else {
+				continue;
+			}
+		}
+
+
 		size_t line_size = strlen(fstab_line);
 		if (fstab_line[line_size - 1] != '\n')
 			fstab_line[line_size] = '\n';
 
 		TWPartition* partition = new TWPartition();
-		if (partition->Process_Fstab_Line(fstab_line, Display_Error, &twrp_flags))
+		if (partition->Process_Fstab_Line(fstab_line, Display_Error, parse_userdata ? NULL : &twrp_flags)) {
+			if (partition->Mount_Point == "/data") data = partition;
+			if (partition->Mount_Point == "/metadata") meta = partition;
+			if (partition->Is_Super && !Prepare_Super_Volume(partition)) {
+				goto clear;
+			}
 			Partitions.push_back(partition);
+		}
 		else
+clear:
 			delete partition;
 
 		memset(fstab_line, 0, sizeof(fstab_line));
 	}
 	fclose(fstabFile);
 
-	if (twrp_flags.size() > 0) {
+	if (!parse_userdata && twrp_flags.size() > 0) {
 		LOGINFO("Processing remaining twrp.flags\n");
 		// Add any items from twrp.flags that did not exist in the recovery.fstab
 		for (std::map<string, Flags_Map>::iterator mapit=twrp_flags.begin(); mapit!=twrp_flags.end(); mapit++) {
@@ -263,14 +404,42 @@ int TWPartitionManager::Process_Fstab(string Fstab_Filename, bool Display_Error,
 			mapit->second.fstab_line = NULL;
 		}
 	}
-	if (Get_Super_Status()) {
-		Setup_Super_Devices();
+
+#ifdef TW_LOAD_VENDOR_MODULES
+	KernelModuleLoader::Load_Vendor_Modules();
+#endif
+
+	TWPartition* ven = PartitionManager.Find_Partition_By_Path("/vendor");
+	TWPartition* odm = PartitionManager.Find_Partition_By_Path("/odm");
+	if (recovery_mode && !parse_userdata) {
+		if (ven) ven->Mount(Display_Error);
+		if (odm) odm->Mount(Display_Error);
+
+		Process_ResetProps(ven, odm);
+		parse_userdata = true;
+
+#ifndef TW_SKIP_ADDITIONAL_FSTAB
+		// Now Fetch the additional fstab
+		if (TWFunc::Find_Fstab(Fstab_Filename)) {
+			LOGINFO("Fstab: %s\n", Fstab_Filename.c_str());
+			TWFunc::copy_file(Fstab_Filename, additional_fstab, 0600, false);
+			Fstab_Filename = additional_fstab;
+			property_set("fstab.additional", "1");
+			goto parse;
+		} else {
+			LOGINFO("Unable to parse vendor fstab\n");
+		}
 	}
 	LOGINFO("Done processing fstab files\n");
-
-	if (recovery_mode) {
-		Setup_Fstab_Partitions(Display_Error);
+#else
+		LOGINFO("Skipping Additional Fstab Processing\n");
+		property_set("fstab.additional", "0");
 	}
+#endif
+
+	if (odm) odm->UnMount(Display_Error);
+	Process_Keymaster_Version(ven, false);
+	if (ven) ven->UnMount(Display_Error);
 	return true;
 }
 
@@ -297,9 +466,6 @@ void TWPartitionManager::Setup_Fstab_Partitions(bool Display_Error) {
 				andsec_partition = (*iter);
 			else
 				(*iter)->Has_Android_Secure = false;
-
-			if ((*iter)->Is_Super && !Prepare_Super_Volume(*iter))
-				Partitions.erase(iter--);
 		}
 
 		Unlock_Block_Partitions();
@@ -309,9 +475,9 @@ void TWPartitionManager::Setup_Fstab_Partitions(bool Display_Error) {
 		TWPartition* ven = PartitionManager.Find_Partition_By_Path("/vendor");
 		if (sys) {
 			if (sys->Get_Super_Status()) {
-				sys->Mount(true);
+				sys->Mount(Display_Error);
 				if (ven) {
-					ven->Mount(true);
+					ven->Mount(Display_Error);
 				}
 	#ifdef TW_EXCLUDE_APEX
 				LOGINFO("Apex is disabled in this build\n");
@@ -329,9 +495,9 @@ void TWPartitionManager::Setup_Fstab_Partitions(bool Display_Error) {
 		}
 	#ifndef USE_VENDOR_LIBS
 		if (ven)
-			ven->UnMount(true);
+			ven->UnMount(Display_Error);
 		if (sys)
-			sys->UnMount(true);
+			sys->UnMount(Display_Error);
 	#endif
 
 		if (!datamedia && !settings_partition && Find_Partition_By_Path("/sdcard") == NULL && Find_Partition_By_Path("/internal_sd") == NULL && Find_Partition_By_Path("/internal_sdcard") == NULL && Find_Partition_By_Path("/emmc") == NULL) {
@@ -430,7 +596,7 @@ void TWPartitionManager::Decrypt_Data() {
 			Set_Crypto_Type("file");
 #ifdef TW_INCLUDE_FBE_METADATA_DECRYPT
 #ifdef USE_FSCRYPT
-			if (android::vold::fscrypt_mount_metadata_encrypted(Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point, false, false, Decrypt_Data->Current_File_System)) {
+			if (android::vold::fscrypt_mount_metadata_encrypted(Decrypt_Data->Actual_Block_Device, Decrypt_Data->Mount_Point, false, false, Decrypt_Data->Current_File_System, TWFunc::Path_Exists(additional_fstab) ? additional_fstab : "")) {
 				std::string crypto_blkdev = android::base::GetProperty("ro.crypto.fs_crypto_blkdev", "error");
 				Decrypt_Data->Decrypted_Block_Device = crypto_blkdev;
 				LOGINFO("Successfully decrypted metadata encrypted data partition with new block device: '%s'\n", crypto_blkdev.c_str());
@@ -464,7 +630,7 @@ void TWPartitionManager::Decrypt_Data() {
 				}
 			}
 		} else {
-			LOGINFO("FBE setup failed. Trying FDE...");
+			LOGINFO("FBE setup failed. Trying FDE...\n");
 			Set_Crypto_State();
 			Set_Crypto_Type("block");
 			int password_type = cryptfs_get_password_type();
@@ -3003,6 +3169,8 @@ bool TWPartitionManager::Decrypt_Adopted() {
 		}
 	}
 
+	//Devices without encryption do not run the Post_Decrypt function so the "data/recovery" folder was not being created on these devices
+	DataManager::SetValue("tw_settings_path", TW_STORAGE_PATH);
 	LOGINFO("Decrypt adopted storage starting\n");
 	char* xmlFile = PageManager::LoadFileToBuffer(path, NULL);
 	xml_document<> *doc = NULL;
@@ -3482,12 +3650,7 @@ void TWPartitionManager::Setup_Super_Partition() {
 }
 
 bool TWPartitionManager::Get_Super_Status() {
-	std::string fastboot_mode = android::base::GetProperty("sys.usb.config", "");
-	if (fastboot_mode == "fastboot") {
-		return false;
-	}
-	else
-		return access(Get_Super_Partition().c_str(), F_OK) == 0;
+	return access(Get_Super_Partition().c_str(), F_OK) == 0;
 }
 
 bool TWPartitionManager::Recreate_Logs_Dir() {

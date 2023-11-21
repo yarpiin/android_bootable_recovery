@@ -24,6 +24,9 @@
 #include <time.h>
 #include <unistd.h>
 #include <signal.h>
+#include <thread>
+#include <chrono>
+#include "recovery_utils/battery_utils.h"
 #include "gui/twmsg.h"
 
 #include "cutils/properties.h"
@@ -44,10 +47,6 @@ extern "C" {
 #include "twcommon.h"
 #include "twrp-functions.hpp"
 #include "data.hpp"
-
-#ifdef TW_LOAD_VENDOR_MODULES
-#include "kernel_module_loader.hpp"
-#endif
 
 #include "partitions.hpp"
 #ifdef __ANDROID_API_N__
@@ -110,21 +109,6 @@ static void process_fastbootd_mode() {
 		LOGINFO("starting fastboot\n");
 
 #ifdef TW_LOAD_VENDOR_MODULES
-		printf("=> Linking mtab\n");
-		symlink("/proc/mounts", "/etc/mtab");
-		std::string fstab_filename = "/etc/twrp.fstab";
-		if (!TWFunc::Path_Exists(fstab_filename)) {
-			fstab_filename = "/etc/recovery.fstab";
-		}
-		printf("=> Processing %s\n", fstab_filename.c_str());
-		if (!PartitionManager.Process_Fstab(fstab_filename, 1, false)) {
-			LOGERR("Failing out of recovery due to problem with fstab.\n");
-			return;
-		}
-		TWPartition* ven = PartitionManager.Find_Partition_By_Path("/vendor");
-		PartitionManager.Setup_Super_Devices();
-		PartitionManager.Prepare_Super_Volume(ven);
-		KernelModuleLoader::Load_Vendor_Modules();
 		if (android::base::GetBoolProperty("ro.virtual_ab.enabled", false)) {
 			PartitionManager.Unmap_Super_Devices();
 		}
@@ -142,10 +126,6 @@ static void process_fastbootd_mode() {
 static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decryption) {
 	char crash_prop_val[PROPERTY_VALUE_MAX];
 	int crash_counter;
-	std::string cmdline;
-	if (TWFunc::read_file("/proc/cmdline", cmdline) != 0) {
-		LOGINFO("Unable to read cmdline for fastboot mode\n");
-	}
 
 	property_get("twrp.crash_counter", crash_prop_val, "-1");
 	crash_counter = atoi(crash_prop_val) + 1;
@@ -159,28 +139,15 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
 		printf("twrp.crash_counter=%d\n", crash_counter);
 	}
 
-	printf("=> Linking mtab\n");
-	symlink("/proc/mounts", "/etc/mtab");
-	std::string fstab_filename = "/etc/twrp.fstab";
-	if (!TWFunc::Path_Exists(fstab_filename)) {
-		fstab_filename = "/etc/recovery.fstab";
-	}
-	printf("=> Processing %s\n", fstab_filename.c_str());
-	if (!PartitionManager.Process_Fstab(fstab_filename, 1, true)) {
-		LOGERR("Failing out of recovery due to problem with fstab.\n");
-		return;
-	}
-
-#ifdef TW_LOAD_VENDOR_MODULES
-	bool fastboot_mode = cmdline.find("twrpfastboot=1") != std::string::npos;
-	if (fastboot_mode)
-		KernelModuleLoader::Load_Vendor_Modules();
-	else
-		KernelModuleLoader::Load_Vendor_Modules();
-#endif
-
 // We are doing this here to allow super partition to be set up prior to overriding properties
-#if defined(TW_INCLUDE_LIBRESETPROP) && defined(TW_OVERRIDE_SYSTEM_PROPS)
+#if defined(TW_INCLUDE_LIBRESETPROP)
+	std::vector<std::string> build_date_props = {"ro.build.date.utc", "ro.bootimage.build.date.utc", "ro.vendor.build.date.utc", "ro.system.build.date.utc", "ro.system_ext.build.date.utc", "ro.product.build.date.utc", "ro.odm.build.date.utc"};
+	std::string val = "0";
+	for (auto prop : build_date_props) {
+		TWFunc::Property_Override(prop, val);
+		LOGINFO("Overriding %s with value: \"%s\"\n", prop.c_str(), val.c_str());
+	}
+#if defined(TW_OVERRIDE_SYSTEM_PROPS)
 	stringstream override_props(EXPAND(TW_OVERRIDE_SYSTEM_PROPS));
 	string current_prop;
 
@@ -238,7 +205,8 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
 		exit:
 		continue;
 	}
-#endif
+#endif // defined(TW_OVERRIDE_SYSTEM_PROPS)
+#endif // defined(TW_INCLUDE_LIBRESETPROP)
 
 	// Check for and run startup script if script exists
 	TWFunc::check_and_run_script("/system/bin/runatboot.sh", "boot");
@@ -417,14 +385,65 @@ int main(int argc, char **argv) {
 
 	// Load default values to set DataManager constants and handle ifdefs
 	DataManager::SetDefaultValues();
+	startupArgs startup;
+	startup.parse(&argc, &argv);
+	android::base::SetProperty(TW_FASTBOOT_MODE_PROP, startup.Get_Fastboot_Mode() ? "1" : "0");
+	printf("=> Linking mtab\n");
+	symlink("/proc/mounts", "/etc/mtab");
+	std::string fstab_filename = "/etc/twrp.fstab";
+	if (!TWFunc::Path_Exists(fstab_filename)) {
+		fstab_filename = "/etc/recovery.fstab";
+	}
+	printf("=> Processing %s\n", fstab_filename.c_str());
+	if (!PartitionManager.Process_Fstab(fstab_filename, 1, !startup.Get_Fastboot_Mode())) {
+		LOGERR("Failing out of recovery due to problem with fstab.\n");
+		return -1;
+	}
+
+#ifdef TW_LOAD_VENDOR_MODULES
+	if (startup.Get_Fastboot_Mode()) {
+		TWPartition* ven_dlkm = PartitionManager.Find_Partition_By_Path("/vendor_dlkm");
+		PartitionManager.Prepare_Super_Volume(PartitionManager.Find_Partition_By_Path("/vendor"));
+		if(ven_dlkm) {
+			PartitionManager.Prepare_Super_Volume(ven_dlkm);
+		}
+	}
+#endif
+
 	printf("Starting the UI...\n");
 	gui_init();
+
+	if (!startup.Get_Fastboot_Mode()) PartitionManager.Setup_Fstab_Partitions(true);
 
 	// Load up all the resources
 	gui_loadResources();
 
-	startupArgs startup;
-	startup.parse(&argc, &argv);
+	std::string value;
+	static char charging = ' ';
+	static int lastVal = -1;
+
+	// Function to monitor battery in the background
+	auto monitorBatteryInBackground = [&]() {
+		while (true) {
+			auto battery_info = GetBatteryInfo();
+			if (battery_info.charging) {
+				charging = '+';
+			} else {
+				charging = ' ';
+			}
+			lastVal = battery_info.capacity;
+			// Format the value based on the background updates
+			value = std::to_string(lastVal) + "%" + charging;
+			DataManager::SetValue("tw_battery", value);
+
+			// Sleep for a specified interval (e.g., 1 second) before checking again
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+		}
+	};
+
+	// Create a thread for battery monitoring
+	static std::thread battery_monitor(monitorBatteryInBackground);
+
 	twrpAdbBuFifo *adb_bu_fifo = new twrpAdbBuFifo();
 	TWFunc::Clear_Bootloader_Message();
 

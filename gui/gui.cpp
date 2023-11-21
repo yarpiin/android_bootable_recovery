@@ -206,9 +206,14 @@ bool InputHandler::processInput(int timeout_ms)
 		break;
 	}
 
-	if (ev.code != KEY_POWER && ev.code > KEY_RESERVED)
-		blankTimer.resetTimerAndUnblank();
-
+#ifndef TW_NO_SCREEN_BLANK
+	if (!blankTimer.isScreenOff()) {
+#endif
+		if (ev.code != KEY_POWER && ev.code > KEY_RESERVED)
+			blankTimer.resetTimerAndUnblank();
+#ifndef TW_NO_SCREEN_BLANK
+	}
+#endif
 	return true;  // we got an event, so there might be more in the queue
 }
 
@@ -528,9 +533,9 @@ static void loopTimer(int input_timeout_ms)
 
 		timespec diff = TWFunc::timespec_diff(lastCall, curTime);
 
-		// This is really 2 or 30 times per second
+		// This is really 2 or TW_FRAMERATE times per second
 		// As long as we get events, increase the timeout so we can catch up with input
-		long timeout = got_event ? 500000000 : 33333333;
+		long timeout = got_event ? 500000000 : (1.0 / TW_FRAMERATE * 1000000000);
 
 		if (diff.tv_sec || diff.tv_nsec > timeout)
 		{
@@ -799,7 +804,7 @@ extern "C" int gui_loadResources(void)
 	{
 		std::string theme_path;
 
-		theme_path = DataManager::GetSettingsStoragePath();
+		theme_path = DataManager::GetCurrentStoragePath();
 		if (!PartitionManager.Mount_Settings_Storage(false))
 		{
 			int retry_count = 5;
@@ -849,7 +854,7 @@ extern "C" int gui_loadCustomResources(void)
 		return -1;
 	}
 
-	std::string theme_path = DataManager::GetSettingsStoragePath();
+	std::string theme_path = DataManager::GetCurrentStoragePath();
 	theme_path += TWFunc::Check_For_TwrpFolder() + "/theme/ui.zip";
 	// Check for a custom theme
 	if (TWFunc::Path_Exists(theme_path)) {

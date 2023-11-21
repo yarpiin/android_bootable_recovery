@@ -34,6 +34,7 @@
 #include <dirent.h>
 #include <private/android_filesystem_config.h>
 #include <android-base/properties.h>
+#include <fstream>
 
 #include <string>
 #include <sstream>
@@ -1052,11 +1053,11 @@ void GUIAction::reinject_after_flash()
 int GUIAction::ozip_decrypt(string zip_path)
 {
 	if (!TWFunc::Path_Exists("/system/bin/ozip_decrypt")) {
-            return 1;
-        }
-    gui_msg("ozip_decrypt_decryption=Starting Ozip Decryption...");
+		return 1;
+	}
+	gui_msg("ozip_decrypt_decryption=Starting Ozip Decryption...");
 	TWFunc::Exec_Cmd("ozip_decrypt " + (string)TW_OZIP_DECRYPT_KEY + " '" + zip_path + "'");
-    gui_msg("ozip_decrypt_finish=Ozip Decryption Finished!");
+	gui_msg("ozip_decrypt_finish=Ozip Decryption Finished!");
 	return 0;
 }
 
@@ -1074,7 +1075,7 @@ int GUIAction::flash(std::string arg)
 		{
 			if((ozip_decrypt(zip_path)) != 0)
 			{
-		LOGERR("Unable to find ozip_decrypt!");
+				LOGERR("Unable to find ozip_decrypt!");
 				break;
 			}
 			zip_filename = (zip_filename.substr(0, zip_filename.size() - 4)).append("zip");
@@ -2347,6 +2348,10 @@ int GUIAction::applycustomtwrpfolder(string arg __unused)
 	if (ret) {
 		DataManager::SetValue(TW_RECOVERY_FOLDER_VAR, '/' + arg);
 		DataManager::SetValue(TW_BACKUPS_FOLDER_VAR, newBackupFolder);
+		//Creates an empty file that marks which folder is TWRP with the renamed new name, after reboot.
+		string path= newFolder + "/.twrpcf";
+		std::ofstream twrpcf(path);
+		twrpcf.close();
 	}
 	operation_end((int)!ret);
 	return 0;
