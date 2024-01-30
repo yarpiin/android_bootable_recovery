@@ -108,11 +108,9 @@ static void Decrypt_Page(bool SkipDecryption, bool datamedia) {
 static void process_fastbootd_mode() {
 		LOGINFO("starting fastboot\n");
 
-#ifdef TW_LOAD_VENDOR_MODULES
-		if (android::base::GetBoolProperty("ro.virtual_ab.enabled", false)) {
+		if (android::base::GetBoolProperty("ro.boot.dynamic_partitions", false)) {
 			PartitionManager.Unmap_Super_Devices();
 		}
-#endif
 
 		gui_msg(Msg("fastboot_console_msg=Entered Fastboot mode..."));
 		// Check for and run startup script if script exists
@@ -425,6 +423,38 @@ int main(int argc, char **argv) {
 	// Function to monitor battery in the background
 	auto monitorBatteryInBackground = [&]() {
 		while (true) {
+#ifdef TW_USE_LEGACY_BATTERY_SERVICES
+			char cap_s[4];
+#ifdef TW_CUSTOM_BATTERY_PATH
+			string capacity_file = EXPAND(TW_CUSTOM_BATTERY_PATH);
+			capacity_file += "/capacity";
+			FILE * cap = fopen(capacity_file.c_str(),"rt");
+#else
+			FILE * cap = fopen("/sys/class/power_supply/battery/capacity","rt");
+#endif
+			if (cap) {
+				fgets(cap_s, 4, cap);
+				fclose(cap);
+				lastVal = atoi(cap_s);
+				if (lastVal > 100)	lastVal = 101;
+				if (lastVal < 0)	lastVal = 0;
+			}
+#ifdef TW_CUSTOM_BATTERY_PATH
+			string status_file = EXPAND(TW_CUSTOM_BATTERY_PATH);
+			status_file += "/status";
+			cap = fopen(status_file.c_str(),"rt");
+#else
+			cap = fopen("/sys/class/power_supply/battery/status","rt");
+#endif
+			if (cap) {
+				fgets(cap_s, 2, cap);
+				fclose(cap);
+				if (cap_s[0] == 'C')
+					charging = '+';
+				else
+					charging = ' ';
+			}
+#else
 			auto battery_info = GetBatteryInfo();
 			if (battery_info.charging) {
 				charging = '+';
@@ -432,6 +462,7 @@ int main(int argc, char **argv) {
 				charging = ' ';
 			}
 			lastVal = battery_info.capacity;
+#endif
 			// Format the value based on the background updates
 			value = std::to_string(lastVal) + "%" + charging;
 			DataManager::SetValue("tw_battery", value);

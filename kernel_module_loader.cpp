@@ -73,6 +73,12 @@ bool KernelModuleLoader::Load_Vendor_Modules() {
 
 		case FASTBOOTD_MODE:
 		case RECOVERY_IN_BOOT_MODE:
+#ifdef TW_LOAD_VENDOR_BOOT_MODULES
+			for (auto&& module_dir:module_dirs) {
+				modules_loaded += Try_And_Load_Modules(module_dir, false);
+				if (modules_loaded >= expected_module_count) goto exit;
+			}
+#endif
 			/* In both mode vendor_boot or vendor modules are used
 			 * Because Ramdisk is flashed in both.
 			 */
@@ -100,7 +106,7 @@ exit:
 	if (ven)
 		ven->UnMount(false);
 	if (ven_dlkm)
-		ven_dlkm->UnMount(false);
+		ven_dlkm->UnMount(false, MNT_DETACH);
 
 	android::base::SetProperty(TW_MODULES_MOUNTED_PROP, "true");
 
@@ -124,7 +130,7 @@ int KernelModuleLoader::Try_And_Load_Modules(std::string module_dir, bool vendor
 			Modprobe m({module_dir}, "modules.load.twrp", false);
 			m.LoadListedModules(false);
 			modules_loaded = m.GetModuleCount();
-			umount2(module_dir.c_str(), MNT_DETACH);
+			PartitionManager.UnMount_By_Path(module_dir.c_str(), false, MNT_DETACH);
 			LOGINFO("Modules Loaded: %d\n", modules_loaded);
 		}
 		return modules_loaded;

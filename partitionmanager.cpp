@@ -808,7 +808,7 @@ int TWPartitionManager::Mount_By_Path(string Path, bool Display_Error) {
 	return false;
 }
 
-int TWPartitionManager::UnMount_By_Path(string Path, bool Display_Error) {
+int TWPartitionManager::UnMount_By_Path(string Path, bool Display_Error, int flags) {
 	std::vector<TWPartition*>::iterator iter;
 	int ret = false;
 	bool found = false;
@@ -817,10 +817,10 @@ int TWPartitionManager::UnMount_By_Path(string Path, bool Display_Error) {
 	// Iterate through all partitions
 	for (iter = Partitions.begin(); iter != Partitions.end(); iter++) {
 		if ((*iter)->Mount_Point == Local_Path || (!(*iter)->Symlink_Mount_Point.empty() && (*iter)->Symlink_Mount_Point == Local_Path)) {
-			ret = (*iter)->UnMount(Display_Error);
+			ret = (*iter)->UnMount(Display_Error, flags);
 			found = true;
 		} else if ((*iter)->Is_SubPartition && (*iter)->SubPartition_Of == Local_Path) {
-			(*iter)->UnMount(Display_Error);
+			(*iter)->UnMount(Display_Error, flags);
 		}
 	}
 	if (found) {
@@ -1762,6 +1762,7 @@ int TWPartitionManager::Wipe_Android_Secure(void) {
 int TWPartitionManager::Format_Data(void) {
 	TWPartition* dat = Find_Partition_By_Path("/data");
 	TWPartition* metadata = Find_Partition_By_Path("/metadata");
+	int ret = false;
 	if (metadata != NULL)
 		metadata->UnMount(false);
 
@@ -1776,7 +1777,10 @@ int TWPartitionManager::Format_Data(void) {
 			if (!Check_Pending_Merges())
 				return false;
 		}
-		return dat->Wipe_Encryption();
+		ret = dat->Wipe_Encryption();
+		if (ret)
+			TWFunc::check_and_run_script("/system/bin/formatdata.sh", "Format Data Script");
+		return ret;
 	} else {
 		gui_msg(Msg(msg::kError, "unable_to_locate=Unable to locate {1}.")("/data"));
 		return false;
@@ -2688,8 +2692,13 @@ void TWPartitionManager::Get_Partition_List(string ListType, std::vector<Partiti
 				Partition_List->push_back(part);
 			}
 		}
-		if (DataManager::GetIntValue("tw_has_repack_tools") != 0 && DataManager::GetIntValue("tw_has_boot_slots") != 0) {
-			TWPartition* boot = Find_Partition_By_Path("/boot");
+		if (DataManager::GetIntValue("tw_has_repack_tools") != 0 && DataManager::GetIntValue("tw_has_boot_slots") != 0 && DataManager::GetIntValue("tw_include_install_recovery_ramdisk") != 0) {
+			std::string dest_partition = "/boot";
+			#ifdef BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT
+				dest_partition = "/vendor_boot";
+			#endif
+
+			TWPartition* boot = Find_Partition_By_Path(dest_partition);
 			if (boot) {
 				// Allow flashing kernels and ramdisks
 				struct PartitionList repack_ramdisk;
@@ -2697,6 +2706,7 @@ void TWPartitionManager::Get_Partition_List(string ListType, std::vector<Partiti
 				repack_ramdisk.Mount_Point = "/repack_ramdisk";
 				repack_ramdisk.selected = 0;
 				Partition_List->push_back(repack_ramdisk);
+				LOGINFO("Install Recovery Ramdisk: target partition=%s\n", dest_partition.c_str());
 				/*struct PartitionList repack_kernel; For now let's leave repacking kernels under advanced only
 				repack_kernel.Display_Name = gui_lookup("install_kernel", "Install Kernel");
 				repack_kernel.Mount_Point = "/repack_kernel";
@@ -3169,7 +3179,6 @@ bool TWPartitionManager::Decrypt_Adopted() {
 		}
 	}
 
-	//Devices without encryption do not run the Post_Decrypt function so the "data/recovery" folder was not being created on these devices
 	DataManager::SetValue("tw_settings_path", TW_STORAGE_PATH);
 	LOGINFO("Decrypt adopted storage starting\n");
 	char* xmlFile = PageManager::LoadFileToBuffer(path, NULL);
