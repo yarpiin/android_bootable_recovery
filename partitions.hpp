@@ -208,7 +208,7 @@ private:
 	bool Wipe_EXFAT();                                                        // Formats as EXFAT
 	bool Wipe_MTD();                                                          // Formats as yaffs2 for MTD memory types
 	bool Wipe_RMRF();                                                         // Uses rm -rf to wipe
-	bool Wipe_F2FS();                                                         // Uses mkfs.f2fs to wipe
+	bool Wipe_F2FS();                                                         // Uses make_f2fs to wipe
 	bool Wipe_NTFS();                                                         // Uses mkntfs to wipe
 	bool Wipe_Data_Without_Wiping_Media();                                    // Uses rm -rf to wipe but does not wipe /data/media
 	bool Wipe_Data_Without_Wiping_Media_Func(const string& parent);           // Uses rm -rf to wipe but does not wipe /data/media
@@ -289,6 +289,7 @@ private:
 	string Original_Path;
 	bool Use_Original_Path;
 	bool Needs_Fs_Compress;
+	bool Needs_Metadata_Csum;
 
 	struct partition_fs_flags_struct {                                        // This struct is used to store mount flags and options for different file systems for the same partition
 		string File_System;

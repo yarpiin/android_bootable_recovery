@@ -169,6 +169,7 @@ GUIAction::GUIAction(xml_node<>* node)
 		ADD_ACTION(key);
 		ADD_ACTION(page);
 		ADD_ACTION(reload);
+		ADD_ACTION(savesettings);
 		ADD_ACTION(readBackup);
 		ADD_ACTION(set);
 		ADD_ACTION(clear);
@@ -596,6 +597,13 @@ int GUIAction::reload(std::string arg __unused)
 	return 0;
 }
 
+int GUIAction::savesettings(std::string arg __unused)
+{
+	DataManager::Flush();
+	//This action will serve to save the settings each time it is called.
+	return 0;
+}
+
 int GUIAction::readBackup(std::string arg __unused)
 {
 	string Restore_Name;
@@ -950,7 +958,7 @@ int GUIAction::getpartitiondetails(std::string arg)
 					DataManager::SetValue("tw_partition_exfat", 1);
 				else
 					DataManager::SetValue("tw_partition_exfat", 0);
-				if (TWFunc::Path_Exists("/system/bin/mkfs.f2fs") || TWFunc::Path_Exists("/system/bin/make_f2fs"))
+				if (TWFunc::Path_Exists("/system/bin/make_f2fs"))
 					DataManager::SetValue("tw_partition_f2fs", 1);
 				else
 					DataManager::SetValue("tw_partition_f2fs", 0);
